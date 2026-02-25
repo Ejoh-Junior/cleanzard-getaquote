@@ -1,0 +1,65 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html, body, #app {
+    font-family: 'League Spartan', Arial, Helvetica, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: 'League Spartan', Arial, Helvetica, sans-serif;
+    font-weight: 700;
+  }
+}
+
+@layer components {
+  /* Progress bar animation */
+  .progress-bar-fill {
+    transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  /* Smooth state transitions */
+  .fade-enter-active,
+  .fade-leave-active {
+    transition: opacity 0.25s ease, transform 0.25s ease;
+  }
+  .fade-enter-from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  .fade-leave-to {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+
+  /* Input base */
+  .input-base {
+    @apply w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-slate-800 font-spartan font-medium
+    focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/20
+    placeholder:text-slate-400 transition-all duration-150;
+  }
+
+  .input-error {
+    @apply border-error ring-2 ring-error/20;
+  }
+
+  /* Card */
+  .card {
+    @apply bg-white rounded-2xl shadow-card border border-slate-100 p-6;
+  }
+
+  /* Section label */
+  .section-label {
+    @apply text-xl font-bold text-slate-800 mb-4 flex items-center gap-2;
+  }
+
+  .section-number {
+    @apply w-7 h-7 rounded-full bg-primary text-white text-sm font-bold flex items-center justify-center flex-shrink-0;
+  }
+}
