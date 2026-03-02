@@ -147,17 +147,12 @@ const stateBadge = computed(() => ({
 const currentStep = ref(1)
 
 function sendHeight() {
-  nextTick(() => {
-    const height = Math.max(
-      document.body.scrollHeight,
-      document.documentElement.scrollHeight
-    )
-    parent.postMessage({ type: 'resize', height }, '*')
-  })
+  const height = document.documentElement.scrollHeight
+  parent.postMessage({ type: 'resize', height }, '*')
 }
 
-window.addEventListener("load", sendHeight);
-window.addEventListener("resize", sendHeight);
+// window.addEventListener("load", sendHeight);
+// window.addEventListener("resize", sendHeight);
 
 // ─── Validation ───────────────────────────────────────────────────────────────
 function validate() {
@@ -316,14 +311,18 @@ function goBackToForm() {
 function handleNewQuote() {
   resetForm()
 }
-watch(currentStep, () => {
-  sendHeight()
-})
+
 // ─── On Mount: check for payment success redirect ─────────────────────────────
 onMounted(async () => {
+  //Dynamic height section
+    const observer = new ResizeObserver(() => {
+    sendHeight()
+  })
+
+  observer.observe(document.documentElement)
+
   sendHeight()
-
-
+ //End of Dynamic height section
 
   const params = new URLSearchParams(window.location.search)
   if (params.get('payment') === 'success') {
