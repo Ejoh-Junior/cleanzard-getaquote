@@ -109,7 +109,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, nextTick } from 'vue'
 import QuoteForm from './components/QuoteForm.vue'
 import SummaryPanel from './components/SummaryPanel.vue'
 import QuoteScreen from './components/QuoteScreen.vue'
@@ -144,8 +144,10 @@ const stateBadge = computed(() => ({
 
 // Send height for autoadjustment of iframe implementation
 function sendHeight() {
-  const height = document.body.scrollHeight;
-  parent.postMessage({ type: "resize", height }, "*");
+  nextTick(() => {
+    const height = document.body.scrollHeight
+    parent.postMessage({ type: 'resize', height }, '*')
+  })
 }
 
 window.addEventListener("load", sendHeight);
@@ -311,6 +313,13 @@ function handleNewQuote() {
 
 // ─── On Mount: check for payment success redirect ─────────────────────────────
 onMounted(async () => {
+    sendHeight()
+
+  const observer = new ResizeObserver(() => {
+    sendHeight()
+  })
+
+  observer.observe(document.body)
   const params = new URLSearchParams(window.location.search)
   if (params.get('payment') === 'success') {
     const reference = params.get('reference')
