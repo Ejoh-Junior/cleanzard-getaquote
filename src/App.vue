@@ -142,6 +142,15 @@ const stateBadge = computed(() => ({
   COMMERCIAL_SUBMITTED: 'Request Sent',
 }[quoteState.appState] || ''))
 
+// Send height for autoadjustment of iframe implementation
+function sendHeight() {
+  const height = document.body.scrollHeight;
+  parent.postMessage({ type: "resize", height }, "*");
+}
+
+window.addEventListener("load", sendHeight);
+window.addEventListener("resize", sendHeight);
+
 // ─── Validation ───────────────────────────────────────────────────────────────
 function validate() {
   const errors = {}
