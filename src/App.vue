@@ -1,9 +1,9 @@
 <template>
-  <div class="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50/30 to-slate-50 font-spartan">
-    <!-- App Header -->
+  <div class="min-h-screen font-spartan">
+    <!-- App Header removed
     <header class="bg-white border-b border-slate-100 shadow-sm sticky top-0 z-30">
       <div class="max-w-6xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between">
-        <!-- Logo -->
+         
         <div class="flex items-center gap-3">
           <div class="w-9 h-9 rounded-xl bg-primary flex items-center justify-center shadow-sm">
             <svg class="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
@@ -16,7 +16,7 @@
           </div>
         </div>
 
-        <!-- State badge -->
+         
         <div class="flex items-center gap-2">
           <span
             v-if="quoteState.appState !== 'FORM'"
@@ -28,7 +28,7 @@
           <span class="text-sm font-spartan font-semibold text-primary">Get a Quote</span>
         </div>
       </div>
-    </header>
+    </header> -->
 
     <!-- Error Banner -->
     <Transition name="fade">
@@ -109,7 +109,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import QuoteForm from './components/QuoteForm.vue'
 import SummaryPanel from './components/SummaryPanel.vue'
 import QuoteScreen from './components/QuoteScreen.vue'
@@ -143,9 +143,15 @@ const stateBadge = computed(() => ({
 }[quoteState.appState] || ''))
 
 // Send height for autoadjustment of iframe implementation
+
+const currentStep = ref(1)
+
 function sendHeight() {
   nextTick(() => {
-    const height = document.body.scrollHeight
+    const height = Math.max(
+      document.body.scrollHeight,
+      document.documentElement.scrollHeight
+    )
     parent.postMessage({ type: 'resize', height }, '*')
   })
 }
@@ -310,16 +316,15 @@ function goBackToForm() {
 function handleNewQuote() {
   resetForm()
 }
-
+watch(currentStep, () => {
+  sendHeight()
+})
 // ─── On Mount: check for payment success redirect ─────────────────────────────
 onMounted(async () => {
-    sendHeight()
+  sendHeight()
 
-  const observer = new ResizeObserver(() => {
-    sendHeight()
-  })
 
-  observer.observe(document.body)
+
   const params = new URLSearchParams(window.location.search)
   if (params.get('payment') === 'success') {
     const reference = params.get('reference')
