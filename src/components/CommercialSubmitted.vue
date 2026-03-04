@@ -11,7 +11,7 @@
       Thanks, <span class="font-bold text-slate-700">{{ fd.firstName }}</span>! We've received your commercial cleaning inquiry.
     </p>
     <p class="text-slate-400 font-spartan text-sm mb-6 max-w-sm">
-      Our team will review your request and contact you during your preferred time:
+      Our team will review your request and contact you within 1 business day during your preferred time:
       <span class="font-semibold text-slate-600">{{ callbackLabel }}</span>.
     </p>
 
