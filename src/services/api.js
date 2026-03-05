@@ -36,6 +36,29 @@ async function post(action, payload) {
   return data
 }
 
+/**
+ * V2: Generic GET helper.
+ * Used for read-only operations (getQuote, checkStatus) – avoids OPTIONS preflight.
+ */
+async function get(action, params = {}) {
+  const qs = new URLSearchParams({ action, ...params }).toString()
+  const url = `${API_BASE}?${qs}`
+
+  const response = await fetch(url, { method: 'GET' })
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+  }
+
+  const data = await response.json()
+
+  if (!data.success) {
+    throw new Error(data.error || 'An unexpected error occurred.')
+  }
+
+  return data
+}
+
 // ─── Endpoint 1: Create Quote ─────────────────────────────────────────────────
 /**
  * @param {Object} formData – residential or commercial form data
@@ -90,6 +113,28 @@ export async function submitCommercialLead(formData) {
   }
 
   return post('createQuote', formData)
+}
+
+// ── V2: New Endpoints ─────────────────────────────────────────────────────────
+
+/**
+ * V2: Fetch full quote data by ID.
+ * Called on mount when ?quoteId= is present in the URL.
+ * Returns all fields needed to hydrate the app state.
+ * @param {string} quoteId
+ */
+export async function fetchQuote(quoteId) {
+  return get('getQuote', { quoteId })
+}
+
+/**
+ * V2: Lightweight paid-status check.
+ * Called every 4 seconds by the polling heartbeat while user is on payment page.
+ * @param {string} quoteId
+ * @returns {Promise<{ success: boolean, quoteId: string, paid: 'Yes'|'No' }>}
+ */
+export async function checkStatus(quoteId) {
+  return get('checkStatus', { quoteId })
 }
 
 // ─── Payment URL Builder ──────────────────────────────────────────────────────

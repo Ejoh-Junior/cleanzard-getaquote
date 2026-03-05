@@ -1,5 +1,5 @@
 /**
- * Cleanzard – Google Apps Script Backend (Code.gs)
+ * Cleanzard – Google Apps Script Backend (Code.gs) – V2
  * 
  * Deploy as Web App:
  *   - Execute as: Me
@@ -20,12 +20,13 @@ const CONFIG = {
   SPREADSHEET_ID: '1mRWP7HL5szAx7rbE6pf4j-pyqSwM8scfKZNklXgvkHI',
   SHEET_NAME: 'Sheet1',
   BUSINESS_EMAIL: 'jrbison2@gmail.com',
+  // V2: Frontend URL used for return-to-quote links in emails
+  FRONTEND_URL: 'https://cleanzard-get-a-quote.netlify.app',
   ALLOWED_ORIGINS: [
     'https://cleanzard.ca',
     'https://solutioncleanzard.godaddysites.com',
     'https://www.cleanzard.ca',
-    // Add your Netlify domain here once deployed:
-    // 'https://cleanzard-quote.netlify.app',
+    // 'https://cleanzard-get-a-quote.netlify.app',
   ],
 }
 
@@ -63,7 +64,6 @@ const PRICING = {
  */
 function doPost(e) {
   try {
-    const origin = e.parameter && e.parameter.origin ? e.parameter.origin : ''
     const action = e.parameter && e.parameter.action ? e.parameter.action : ''
 
     let body = {}
@@ -89,6 +89,13 @@ function doPost(e) {
       case 'markPaid':
         result = handleMarkPaid(body)
         break
+      // ── V2: GoDaddy Payment Webhook ──────────────────────────────────────
+      // GoDaddy Pay will POST a JSON payload when a payment is completed.
+      // Configure this Web App URL as the webhook endpoint in your GoDaddy Pay settings.
+      // Expected payload: { "reference": "Q-XXXXXX", ... }
+      case 'paymentWebhook':
+        result = handlePaymentWebhook(body)
+        break
       default:
         result = { success: false, error: 'Unknown action: ' + action }
     }
@@ -100,18 +107,37 @@ function doPost(e) {
   }
 }
 
+/**
+ * V2: GET requests handle read-only operations (getQuote, checkStatus).
+ * Using GET avoids the OPTIONS preflight issue entirely for polling.
+ */
 function doGet(e) {
+  const action = e.parameter && e.parameter.action ? e.parameter.action : ''
+
+  // ── V2: Get full quote by ID ─────────────────────────────────────────────
+  if (action === 'getQuote') {
+    const quoteId = sanitize(e.parameter.quoteId || '')
+    if (!quoteId) return buildResponse({ success: false, error: 'quoteId is required.' })
+    return buildResponse(handleGetQuote({ quoteId }))
+  }
+
+  // ── V2: Lightweight paid status check (used by polling heartbeat) ────────
+  if (action === 'checkStatus') {
+    const quoteId = sanitize(e.parameter.quoteId || '')
+    if (!quoteId) return buildResponse({ success: false, error: 'quoteId is required.' })
+    return buildResponse(handleCheckStatus({ quoteId }))
+  }
+
   // Health check
-  return buildResponse({ success: true, message: 'Cleanzard API is running.' })
+  return buildResponse({ success: true, message: 'Cleanzard API V2 is running.' })
 }
 
 // ─── CORS / Response Builder ──────────────────────────────────────────────────
 
 function buildResponse(data) {
-  const output = ContentService
+  return ContentService
     .createTextOutput(JSON.stringify(data))
     .setMimeType(ContentService.MimeType.JSON)
-  return output
 }
 
 // ─── Action Handlers ──────────────────────────────────────────────────────────
@@ -252,7 +278,7 @@ function handleCreateQuote(body) {
  * Confirm booking – update arrival window in sheet.
  */
 function handleConfirmBooking(body) {
-  const quoteId      = sanitize(body.quoteId)
+  const quoteId       = sanitize(body.quoteId)
   const arrivalWindow = sanitize(body.arrivalWindow)
 
   if (!quoteId || !arrivalWindow) {
@@ -329,6 +355,142 @@ function handleMarkPaid(body) {
   return { success: true, quoteId }
 }
 
+// ── V2: New Handlers ──────────────────────────────────────────────────────────
+
+/**
+ * V2: Get full quote data by quoteId.
+ * Used by the frontend to hydrate state when a returning user lands with ?quoteId=
+ * Returns all fields needed to reconstruct the QuoteScreen or SuccessScreen.
+ */
+function handleGetQuote(body) {
+  const quoteId = sanitize(body.quoteId)
+
+  if (!quoteId) {
+    return { success: false, error: 'quoteId is required.' }
+  }
+
+  try {
+    const sheet = SpreadsheetApp
+      .openById(CONFIG.SPREADSHEET_ID)
+      .getSheetByName(CONFIG.SHEET_NAME)
+
+    const rowNum = findRowByQuoteId(sheet, quoteId)
+    if (!rowNum) {
+      return { success: false, error: 'Quote not found: ' + quoteId }
+    }
+
+    // Read all 22 columns
+    const row = sheet.getRange(rowNum, 1, 1, 22).getValues()[0]
+
+    // Map columns back to named fields (preserving exact sheet column order)
+    return {
+      success: true,
+      quoteId:       row[0],   // A
+      timestamp:     row[1],   // B
+      propertyType:  row[2],   // C
+      firstName:     row[3],   // D
+      lastName:      row[4],   // E
+      email:         row[5],   // F
+      phone:         row[6],   // G
+      address:       row[7],   // H
+      bedrooms:      row[8],   // I
+      bathrooms:     row[9],   // J
+      pets:          row[10],  // K – 'Yes'/'No' string
+      cleaningType:  row[11],  // L
+      addons:        row[12],  // M – comma-separated string
+      frequency:     row[13],  // N
+      serviceDate:   row[14],  // O
+      total:         row[15],  // P
+      arrivalWindow: row[16],  // Q
+      paid:          row[17],  // R – 'Yes'/'No'
+      businessName:  row[18],  // S
+      language:      row[19],  // T
+      callbackTime:  row[20],  // U
+      notes:         row[21],  // V
+    }
+  } catch (err) {
+    Logger.log('getQuote error: ' + err.message)
+    return { success: false, error: 'Could not retrieve quote.' }
+  }
+}
+
+/**
+ * V2: Lightweight status check – only returns paid status.
+ * Called every 4 seconds by the polling heartbeat while user is on payment page.
+ */
+function handleCheckStatus(body) {
+  const quoteId = sanitize(body.quoteId)
+
+  if (!quoteId) {
+    return { success: false, error: 'quoteId is required.' }
+  }
+
+  try {
+    const sheet = SpreadsheetApp
+      .openById(CONFIG.SPREADSHEET_ID)
+      .getSheetByName(CONFIG.SHEET_NAME)
+
+    const rowNum = findRowByQuoteId(sheet, quoteId)
+    if (!rowNum) {
+      return { success: false, error: 'Quote not found.' }
+    }
+
+    // Only read column R (paid) – minimal sheet access for speed
+    const paid = sheet.getRange(rowNum, 18).getValue()
+
+    return {
+      success: true,
+      quoteId,
+      paid: paid === 'Yes' ? 'Yes' : 'No',
+    }
+  } catch (err) {
+    Logger.log('checkStatus error: ' + err.message)
+    return { success: false, error: 'Could not check status.' }
+  }
+}
+
+/**
+ * V2: GoDaddy Payment Webhook handler.
+ * 
+ * HOW TO CONFIGURE:
+ *   In your GoDaddy Pay dashboard → Settings → Webhooks
+ *   Set the endpoint to this Web App URL with ?action=paymentWebhook
+ *   e.g. https://script.google.com/macros/s/YOUR_ID/exec?action=paymentWebhook
+ * 
+ * GoDaddy sends a JSON payload on payment completion.
+ * We look for the "reference" field which should match your Quote ID (Q-XXXXXX).
+ * 
+ * NOTE: GoDaddy Pay webhook payload structure may vary.
+ * Inspect actual payloads in Apps Script logs and adjust field names as needed.
+ */
+function handlePaymentWebhook(body) {
+  Logger.log('Webhook received: ' + JSON.stringify(body))
+
+  // GoDaddy Pay typically sends the reference in one of these fields.
+  // Adjust based on actual payload – check logs after first real payment.
+  const reference = sanitize(
+    body.reference ||
+    body.orderReference ||
+    body.customReference ||
+    body.metadata?.reference ||
+    ''
+  )
+
+  if (!reference) {
+    Logger.log('Webhook: no reference field found in payload.')
+    return { success: false, error: 'No reference found in webhook payload.' }
+  }
+
+  // Only process if it looks like our Quote ID format
+  if (!reference.startsWith('Q-')) {
+    Logger.log('Webhook: reference does not match Q-XXXXX format: ' + reference)
+    return { success: false, error: 'Reference format unrecognized.' }
+  }
+
+  Logger.log('Webhook: marking paid for ' + reference)
+  return handleMarkPaid({ quoteId: reference })
+}
+
 // ─── Email Helpers ────────────────────────────────────────────────────────────
 
 function sendCustomerEmail(email, firstName, quoteId, propertyType, total, breakdown, formData) {
@@ -337,9 +499,12 @@ function sendCustomerEmail(email, firstName, quoteId, propertyType, total, break
     ? `[Cleanzard] Commercial Inquiry Received – ${quoteId}`
     : `[Cleanzard] Your Quote is Ready – ${quoteId}`
 
+  // V2: Build return-to-quote link so customer can come back and pay later
+  const returnLink = `${CONFIG.FRONTEND_URL}/?quoteId=${quoteId}`
+
   const body = isCommercial
     ? `Hi ${firstName},\n\nThank you for your commercial cleaning inquiry!\n\nWe've received your request and our team will contact you at your preferred time.\n\nReference: ${quoteId}\n\nBest regards,\nThe Cleanzard Team\ncontact@cleanzard.ca`
-    : `Hi ${firstName},\n\nYour cleaning quote is ready!\n\nQuote ID: ${quoteId}\nService: ${formatCleaningType(formData.cleaningType)}\nDate: ${formData.serviceDate || 'TBD'}\nFrequency: ${formData.frequency || 'One-Time'}\n\nEstimated Total: $${Number(total).toFixed(2)}\n\nBreakdown:\n${formatBreakdown(breakdown)}\n\nTax is not included and will not be charged.\n\nTo complete your booking, please visit: https://cleanzard.ca\n\nBest regards,\nThe Cleanzard Team\ncontact@cleanzard.ca`
+    : `Hi ${firstName},\n\nYour cleaning quote is ready!\n\nQuote ID: ${quoteId}\nService: ${formatCleaningType(formData.cleaningType)}\nDate: ${formData.serviceDate || 'TBD'}\nFrequency: ${formData.frequency || 'One-Time'}\n\nEstimated Total: $${Number(total).toFixed(2)}\n\nBreakdown:\n${formatBreakdown(breakdown)}\n\nTax is not included and will not be charged.\n\n────────────────────────\nReady to book? Return to your quote anytime:\n${returnLink}\n────────────────────────\n\nBest regards,\nThe Cleanzard Team\ncontact@cleanzard.ca`
 
   GmailApp.sendEmail(email, subject, body, {
     // from: CONFIG.BUSINESS_EMAIL,
@@ -442,5 +607,15 @@ function formatBreakdown(breakdown) {
 //   }
 
 //   const result = handleCreateQuote(fakeRequest)
-// Logger.log(JSON.stringify(result, null, 2))
+//   Logger.log(JSON.stringify(result, null, 2))
+// }
+
+// function testGetQuote() {
+//   const result = handleGetQuote({ quoteId: 'Q-XXXXXX' }) // ← replace with real ID
+//   Logger.log(JSON.stringify(result, null, 2))
+// }
+
+// function testCheckStatus() {
+//   const result = handleCheckStatus({ quoteId: 'Q-XXXXXX' }) // ← replace with real ID
+//   Logger.log(JSON.stringify(result, null, 2))
 // }

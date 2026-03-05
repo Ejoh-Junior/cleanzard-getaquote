@@ -82,9 +82,22 @@
         <p class="font-spartan font-semibold text-slate-600">Calculating your quote…</p>
       </div>
 
+      <!-- ── V2: LOADING state – hydrating a returning quote ── -->
+      <div v-else-if="quoteState.appState === 'LOADING'" class="flex flex-col items-center justify-center py-20">
+        <div class="w-16 h-16 rounded-full border-4 border-primary border-t-transparent animate-spin mb-4"></div>
+        <p class="font-spartan font-semibold text-slate-600">Loading your quote…</p>
+        <p class="text-sm text-slate-400 font-spartan mt-1">Just a moment.</p>
+      </div>
+
       <!-- ── QUOTE_READY state ── -->
       <div v-else-if="quoteState.appState === 'QUOTE_READY'" class="max-w-2xl mx-auto">
-        <QuoteScreen :is-confirming="isConfirming" @confirm-booking="handleConfirmBooking" @back="goBackToForm" />
+        <QuoteScreen
+          :is-confirming="isConfirming"
+          :is-returning-user="isReturningUser"
+          @confirm-booking="handleConfirmBooking"
+          @pay-now="handlePayNow"
+          @back="goBackToForm"
+        />
       </div>
 
       <!-- ── PAYMENT_REDIRECT state ── -->
@@ -92,6 +105,25 @@
         <div class="w-16 h-16 rounded-full border-4 border-primary border-t-transparent animate-spin mb-4"></div>
         <p class="font-spartan font-semibold text-slate-600">Redirecting to payment…</p>
         <p class="text-sm text-slate-400 font-spartan mt-1">You'll be taken to our secure payment page.</p>
+      </div>
+
+      <!-- ── V2: WAITING_FOR_PAYMENT state – polling heartbeat active ── -->
+      <div v-else-if="quoteState.appState === 'WAITING_FOR_PAYMENT'" class="flex flex-col items-center justify-center py-20 text-center">
+        <div class="relative w-20 h-20 mb-6">
+          <div class="absolute inset-0 rounded-full border-4 border-primary/20"></div>
+          <div class="w-20 h-20 rounded-full border-4 border-primary border-t-transparent animate-spin"></div>
+        </div>
+        <h3 class="font-spartan font-bold text-slate-700 text-lg mb-2">Waiting for payment…</h3>
+        <p class="text-sm text-slate-400 font-spartan mb-1">Complete your payment in the tab that just opened.</p>
+        <p class="text-xs text-slate-400 font-spartan">This page will update automatically once payment is confirmed.</p>
+
+        <!-- Manual cancel / back option -->
+        <button
+          @click="cancelPolling"
+          class="mt-6 text-sm text-slate-400 hover:text-primary font-spartan underline underline-offset-2 transition-colors"
+        >
+          ← Back to quote
+        </button>
       </div>
 
       <!-- ── PAYMENT_SUCCESS state ── -->
@@ -109,7 +141,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import QuoteForm from './components/QuoteForm.vue'
 import SummaryPanel from './components/SummaryPanel.vue'
 import QuoteScreen from './components/QuoteScreen.vue'
@@ -118,7 +150,7 @@ import CommercialSubmitted from './components/CommercialSubmitted.vue'
 
 import { useQuoteState } from './composables/useQuoteState.js'
 import { usePricing } from './composables/usePricing.js'
-import { createQuote, confirmBooking, markPaid, submitCommercialLead, buildPaymentUrl } from './services/api.js'
+import { createQuote, confirmBooking, markPaid, submitCommercialLead, buildPaymentUrl, fetchQuote, checkStatus } from './services/api.js'
 
 const { quoteState, setState, resetForm } = useQuoteState()
 const { estimate } = usePricing()
@@ -126,6 +158,14 @@ const { estimate } = usePricing()
 const globalError = ref('')
 const isSubmitting = ref(false)
 const isConfirming = ref(false)
+
+// ── V2: Returning user flag – set during quote hydration ──────────────────────
+// true when the user arrived via a ?quoteId= link (e.g. from their email)
+const isReturningUser = ref(false)
+
+// ── V2: Polling interval reference ───────────────────────────────────────────
+let pollInterval = null
+const POLL_INTERVAL_MS = 4000 // 4 seconds
 
 // ─── Derived state flags ──────────────────────────────────────────────────────
 const isFormState = computed(() =>
@@ -140,6 +180,8 @@ const stateBadge = computed(() => ({
   PAYMENT_REDIRECT: 'Redirecting…',
   PAYMENT_SUCCESS: 'Paid ✓',
   COMMERCIAL_SUBMITTED: 'Request Sent',
+  WAITING_FOR_PAYMENT: 'Awaiting Payment…',
+  LOADING: 'Loading…',
 }[quoteState.appState] || ''))
 
 // Send height for autoadjustment of iframe implementation
@@ -272,6 +314,7 @@ async function handleSubmit() {
 }
 
 // ─── Confirm Booking ──────────────────────────────────────────────────────────
+// Called for NEW users who haven't selected arrival window yet
 async function handleConfirmBooking() {
   if (!quoteState.bookingData.arrivalWindow) {
     quoteState.errors.arrivalWindow = 'Please select an arrival window.'
@@ -286,15 +329,13 @@ async function handleConfirmBooking() {
     const { quoteId } = quoteState.quoteResponse
     await confirmBooking(quoteId, quoteState.bookingData.arrivalWindow)
 
-    // Redirect to GoDaddy payment
-    setState('PAYMENT_REDIRECT')
+    // V2: Open payment in new tab + start polling instead of redirecting
     const fd = quoteState.formData
     const payUrl = buildPaymentUrl(fd.firstName, fd.lastName, fd.email, quoteId)
 
-    // Short delay so user sees redirect state
-    setTimeout(() => {
-      window.location.href = payUrl
-    }, 1000)
+    window.open(payUrl, '_blank')
+    startPolling(quoteId)
+    setState('WAITING_FOR_PAYMENT')
   } catch (err) {
     globalError.value = err.message || 'Could not confirm booking. Please try again.'
     setState('QUOTE_READY')
@@ -303,37 +344,146 @@ async function handleConfirmBooking() {
   }
 }
 
+// ── V2: Pay Now – for returning users who already have an arrival window ──────
+// Called from QuoteScreen when the user is returning and arrival is already set
+function handlePayNow() {
+  const fd = quoteState.formData
+  const { quoteId } = quoteState.quoteResponse
+
+  const payUrl = buildPaymentUrl(fd.firstName, fd.lastName, fd.email, quoteId)
+  window.open(payUrl, '_blank')
+
+  startPolling(quoteId)
+  setState('WAITING_FOR_PAYMENT')
+}
+
+// ── V2: Polling heartbeat ─────────────────────────────────────────────────────
+function startPolling(quoteId) {
+  stopPolling() // clear any existing interval first
+
+  pollInterval = setInterval(async () => {
+    try {
+      const result = await checkStatus(quoteId)
+      if (result.paid === 'Yes') {
+        stopPolling()
+        setState('PAYMENT_SUCCESS')
+        await nextTick()
+        sendHeight()
+      }
+    } catch (err) {
+      // Non-fatal – keep polling silently
+      console.warn('Poll check failed (retrying):', err.message)
+    }
+  }, POLL_INTERVAL_MS)
+}
+
+function stopPolling() {
+  if (pollInterval) {
+    clearInterval(pollInterval)
+    pollInterval = null
+  }
+}
+
+function cancelPolling() {
+  stopPolling()
+  setState('QUOTE_READY')
+}
+
+// Ensure polling is cleaned up if the component unmounts
+onUnmounted(() => stopPolling())
+
 function goBackToForm() {
   quoteState.quoteResponse = null
+  isReturningUser.value = false
   setState('FORM')
 }
 
 function handleNewQuote() {
+  isReturningUser.value = false
   resetForm()
 }
 
-// ─── On Mount: check for payment success redirect ─────────────────────────────
+// ─── On Mount ─────────────────────────────────────────────────────────────────
 onMounted(async () => {
-  //Dynamic height section
-    const observer = new ResizeObserver(() => {
+  // Dynamic height section
+  const observer = new ResizeObserver(() => {
     sendHeight()
   })
 
   observer.observe(document.documentElement)
-
   sendHeight()
- //End of Dynamic height section
+  // End of Dynamic height section
 
   const params = new URLSearchParams(window.location.search)
+
+  // ── V2: Hydrate from ?quoteId= (returning user via email link) ────────────
+  if (params.get('quoteId')) {
+    const quoteId = params.get('quoteId')
+    setState('LOADING')
+
+    try {
+      const data = await fetchQuote(quoteId)
+
+      // Hydrate formData so QuoteScreen / SuccessScreen render correctly
+      quoteState.formData.firstName    = data.firstName || ''
+      quoteState.formData.lastName     = data.lastName || ''
+      quoteState.formData.email        = data.email || ''
+      quoteState.formData.phone        = data.phone || ''
+      quoteState.formData.address      = data.address || ''
+      quoteState.formData.propertyType = data.propertyType || ''
+      quoteState.formData.cleaningType = data.cleaningType || 'regular'
+      quoteState.formData.frequency    = data.frequency || 'one-time'
+      quoteState.formData.serviceDate  = data.serviceDate || ''
+      quoteState.formData.pets         = data.pets === 'Yes'
+      // addons come back as a comma-separated string from the sheet
+      quoteState.formData.addons       = data.addons
+        ? data.addons.split(',').map(a => a.trim()).filter(Boolean)
+        : []
+
+      // Hydrate quote response (backend-authoritative total)
+      quoteState.quoteResponse = {
+        quoteId: data.quoteId,
+        total: data.total,
+        breakdown: {},  // breakdown not stored in sheet; display total only for returning users
+      }
+
+      // Restore arrival window if already confirmed
+      if (data.arrivalWindow) {
+        quoteState.bookingData.arrivalWindow = data.arrivalWindow
+      }
+
+      // Mark as returning so QuoteScreen can show the right UI
+      isReturningUser.value = true
+
+      // Route to correct screen based on current quote state
+      if (data.paid === 'Yes') {
+        setState('PAYMENT_SUCCESS')
+      } else {
+        // Whether arrivalWindow is set or not, go to QUOTE_READY
+        // QuoteScreen will show the right section based on isReturningUser + arrivalWindow
+        setState('QUOTE_READY')
+      }
+
+      // Clean the URL so refreshing doesn't re-trigger hydration
+      window.history.replaceState({}, document.title, window.location.pathname)
+
+      await nextTick()
+      sendHeight()
+    } catch (err) {
+      globalError.value = 'Could not load quote ' + quoteId + '. ' + (err.message || '')
+      setState('FORM')
+    }
+    return // skip the payment=success check below
+  }
+
+  // ── V1: Legacy payment=success redirect (kept for backwards compatibility) ──
   if (params.get('payment') === 'success') {
     const reference = params.get('reference')
     if (reference) {
       try {
         await markPaid(reference)
-        // Store quoteId for display
         quoteState.quoteResponse = { quoteId: reference, total: 0, breakdown: {} }
         setState('PAYMENT_SUCCESS')
-        // Clean URL
         window.history.replaceState({}, document.title, window.location.pathname)
       } catch (err) {
         console.error('markPaid failed:', err)
